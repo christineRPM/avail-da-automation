@@ -1,0 +1,41 @@
+# Ansible specific
+*.retry
+*.pyc
+__pycache__/
+.vault_pass
+vault.key
+vault.txt
+
+# Environment files
+.env
+.venv/
+venv/
+ENV/
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+# Editor/IDE specific
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+logs/
+
+# Runtime data
+*.pid
+*.pid.lock
+
+# Secrets and keys
+*.pem
+*.key
+*.crt
+
+# Inventory files that might contain sensitive data
+inventory/*.local
+inventory/local*

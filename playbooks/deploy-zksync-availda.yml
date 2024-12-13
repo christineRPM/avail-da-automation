@@ -1,0 +1,485 @@
+---
+- name: Setup ZKSync Era with Avail DA
+  hosts: all
+  become: yes
+  vars_prompt:
+    - name: chain_name
+      prompt: "Enter your Chain Name"
+      private: no
+      default: "zk-avail-testnet"
+    - name: avail_app_id
+      prompt: "Enter your Avail App ID"
+      private: no
+    - name: avail_seed_phrase
+      prompt: "Enter your Avail Seed Phrase (leave empty for none)"
+      private: yes
+      default: ""
+
+  vars:
+    user: "{{ ansible_user }}"
+    home_dir: "/home/{{ user }}"
+    nvm_version: "v0.39.5"
+    node_version: "20"
+    yarn_version: "1.22.19"
+    rust_path: "{{ home_dir }}/.cargo/bin"
+
+  tasks:
+    - name: Create templates directory
+      file:
+        path: templates
+        state: directory
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+    - name: Install system dependencies
+      apt:
+        name:
+          - build-essential
+          - pkg-config
+          - cmake
+          - clang
+          - lldb
+          - lld
+          - libssl-dev
+          - libpq-dev
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - software-properties-common
+          - python3
+          - make
+          - g++
+          - expect
+        state: present
+
+    - name: Install UFW if not present
+      apt:
+        name: ufw
+        state: present
+
+    - name: Enable UFW
+      ufw:
+        state: enabled
+        policy: deny
+
+    - name: Allow OpenSSH in UFW
+      ufw:
+        rule: allow
+        name: OpenSSH
+
+    - name: Allow HTTP and HTTPS
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop:
+        - '80'
+        - '443'
+    
+    - name: Allow ZKSync ports
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop:
+        - '8545'    # L1 Node
+        - '3000'    # API server
+        - '3001'    # Web client
+        - '3002'    # WebSocket
+        - '8080'    # Prometheus
+        - '9090'    # Additional metrics
+        - '4000'    # Main API
+        - '8011'    # Bridge
+        - '3030'    # Main server
+
+    - name: Reload UFW
+      ufw:
+        state: reloaded
+
+    - name: Configure git
+      git_config:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        scope: global
+      loop:
+        - { name: 'url."https://github.com/".insteadOf', value: 'git@github.com:' }
+        - { name: 'url."https://".insteadOf', value: 'git://' }
+
+    - name: Install Docker repository
+      block:
+        - name: Ensure docker group exists
+          group:
+            name: docker
+            state: present
+
+        - name: Add Docker GPG key
+          apt_key:
+            url: https://download.docker.com/linux/ubuntu/gpg
+            state: present
+
+        - name: Add Docker repository
+          apt_repository:
+            repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu focal stable"
+            state: present
+
+        - name: Install Docker
+          apt:
+            name: 
+              - docker-ce
+              - docker-ce-cli
+              - containerd.io
+            state: present
+
+    - name: Add user to docker group
+      user:
+        name: "{{ user }}"
+        groups: docker
+        append: yes
+
+    - name: Reset SSH connection for Docker group changes to take effect
+      meta: reset_connection
+
+    - name: Start Docker service
+      service:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Install NVM
+      become_user: "{{ user }}"
+      shell: |
+        curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/{{ nvm_version }}/install.sh | bash
+      args:
+        creates: "{{ home_dir }}/.nvm/nvm.sh"
+
+    - name: Setup NVM and Node.js
+      become_user: "{{ user }}"
+      shell: |
+        export NVM_DIR="{{ home_dir }}/.nvm"
+        [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+        nvm install {{ node_version }}
+        nvm use {{ node_version }}
+        npm install -g yarn@{{ yarn_version }}
+      args:
+        executable: /bin/bash
+
+    - name: Install Rust and Cargo
+      become_user: "{{ user }}"
+      shell: |
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        . {{ home_dir }}/.cargo/env
+        rustup update stable
+        rustup default stable
+        rustup show
+      args:
+        executable: /bin/bash
+        chdir: "{{ home_dir }}"
+
+    - name: Install Rust tools
+      become_user: "{{ user }}"
+      shell: |
+        . {{ home_dir }}/.cargo/env
+        rustup install stable
+        rustup default stable
+        cargo +stable install cargo-nextest
+        cargo +stable install sqlx-cli --version 0.8.1
+      args:
+        executable: /bin/bash
+        chdir: "{{ home_dir }}"
+    - name: Install Foundry ZKSync
+      become_user: "{{ user }}"
+      shell: |
+        curl -L https://raw.githubusercontent.com/matter-labs/foundry-zksync/main/install-foundry-zksync | bash
+        export PATH="$HOME/.foundry/bin:$PATH"
+        source {{ home_dir }}/.bashrc
+        which foundryup-zksync || echo "foundryup-zksync not found"
+        foundryup-zksync || true
+      args:
+        executable: /bin/bash
+
+    - name: Install ZKStack CLI
+      become_user: "{{ user }}"
+      shell: |
+        curl -L https://raw.githubusercontent.com/matter-labs/zksync-era/main/zkstack_cli/zkstackup/install | bash
+        source {{ home_dir }}/.bashrc
+      args:
+        executable: /bin/bash
+
+    - name: Run zkstackup
+      become_user: "{{ user }}"
+      shell: |
+        source {{ home_dir }}/.cargo/env
+        {{ home_dir }}/.local/bin/zkstackup
+      args:
+        executable: /bin/bash
+        
+    - name: Clone ZKSync Era repository
+      become_user: "{{ user }}"
+      git:
+        repo: https://github.com/matter-labs/zksync-era.git
+        dest: "{{ home_dir }}/zksync-era"
+        force: yes
+
+    - name: Initialize git submodules
+      become_user: "{{ user }}"
+      shell: |
+        cd {{ home_dir }}/zksync-era
+        git submodule update --init --recursive
+      args:
+        executable: /bin/bash
+
+    - name: Create expect script for ZKSync setup
+      become_user: "{{ user }}"
+      copy:
+        dest: "{{ home_dir }}/zksync_setup.exp"
+        mode: '0755'
+        content: |
+          #!/usr/bin/expect
+          set timeout 300
+          
+          spawn zkstack chain create
+          
+          # Chain name
+          expect "What do you want to name the chain?"
+          send "{{ chain_name }}\r"
+          
+          # Chain ID - just press enter for default
+          expect "What's the chain id?"
+          send "\r"
+          
+          # Wallet creation
+          expect "Select how do you want to create the wallet"
+          send "\r" 
+          
+          # Prover mode
+          expect "Select the prover mode"
+          send "\r" 
+          
+          # Commit data generator mode
+          expect "Select the commit data generator mode"
+          send "\033\[B\r"
+          
+          # Base token
+          expect "Select the base token to use"
+          send "\r" 
+          
+          # EVM emulator
+          expect "Enable EVM emulator?"
+          send "\r" 
+          
+          # Set as default chain
+          expect "Set this chain as default?"
+          send "\r" 
+          
+          expect eof
+
+    - name: Create environment setup script
+      become_user: "{{ user }}"
+      copy:
+        dest: "{{ home_dir }}/zksync_env.sh"
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          
+          # Source NVM
+          export NVM_DIR="{{ home_dir }}/.nvm"
+          [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+          
+          # Source Cargo/Rust
+          source {{ home_dir }}/.cargo/env
+          
+          # Add local and foundry bins to PATH
+          export PATH="{{ home_dir }}/.local/bin:{{ home_dir }}/.foundry/bin:$PATH"
+          
+          # Use correct Node version
+          nvm use {{ node_version }}
+
+    - name: Clean ZKSync environment
+      become_user: "{{ user }}"
+      shell: |
+        source {{ home_dir }}/zksync_env.sh
+        {{ home_dir }}/.local/bin/zkstack dev clean all
+      args:
+        executable: /bin/bash
+        chdir: "{{ home_dir }}/zksync-era"
+      environment:
+        PATH: "{{ home_dir }}/.local/bin:{{ home_dir }}/.foundry/bin:{{ ansible_env.PATH }}"
+
+    - name: Setup ZKSync containers
+      become_user: "{{ user }}"
+      shell: |
+        set -e
+        . {{ home_dir }}/zksync_env.sh
+        /usr/bin/expect << 'EOF'
+        set timeout 300
+        spawn {{ home_dir }}/.local/bin/zkstack containers
+        expect "Do you want to run observability?"
+        send "\r"
+        expect eof
+        EOF
+      args:
+        executable: /bin/bash
+        chdir: "{{ home_dir }}/zksync-era"
+      environment:
+        PATH: "{{ home_dir }}/.local/bin:{{ home_dir }}/.foundry/bin:{{ ansible_env.PATH }}"
+
+    - name: Create expect script for ecosystem init
+      become_user: "{{ user }}"
+      copy:
+        dest: "{{ home_dir }}/ecosystem_setup.exp"
+        mode: '0755'
+        content: |
+          #!/usr/bin/expect
+          set timeout 600
+          
+          spawn zkstack ecosystem init
+          
+          # Deploy test ERC20s
+          expect "Do you want to deploy some test ERC20s?"
+          send "\r"
+          
+          # Deploy ecosystem contracts
+          expect "Do you want to deploy ecosystem contracts?"
+          send "\r"
+          
+          # L1 network RPC URL
+          expect "What is the RPC URL of the L1 network?"
+          send "http://0.0.0.0:8545\r"
+          
+          # Setup observability
+          expect "Do you want to setup observability?"
+          send "\r"
+          
+          # Deploy Paymaster contract
+          expect "Do you want to deploy Paymaster contract?"
+          send "\r"
+          
+          # Server database URL
+          expect "Please provide server database url"
+          send "\r"
+          
+          # Database name
+          expect "Please provide server database name"
+          send "\r"
+          
+          expect eof
+
+    - name: Wait for Docker to be ready
+      command: docker ps
+      register: docker_test
+      until: docker_test.rc == 0
+      retries: 5
+      delay: 5
+      become_user: "{{ user }}"
+
+    - name: Initialize ZKSync ecosystem
+      become_user: "{{ user }}"
+      shell: |
+        source {{ home_dir }}/zksync_env.sh
+        expect {{ home_dir }}/ecosystem_setup.exp
+      args:
+        executable: /bin/bash
+        chdir: "{{ home_dir }}/zksync-era"
+      environment:
+        PATH: "{{ home_dir }}/.local/bin:{{ home_dir }}/.foundry/bin:{{ ansible_env.PATH }}"
+        DOCKER_USER: "{{ user }}"  
+    
+    - name: Run ZKSync setup script
+      become_user: "{{ user }}"
+      shell: |
+        source {{ home_dir }}/zksync_env.sh
+        expect {{ home_dir }}/zksync_setup.exp
+      args:
+        executable: /bin/bash
+        chdir: "{{ home_dir }}/zksync-era"
+      environment:
+        PATH: "{{ home_dir }}/.local/bin:{{ home_dir }}/.foundry/bin:{{ ansible_env.PATH }}"
+
+    - name: Initialize ZKSync chain
+      become_user: "{{ user }}"
+      shell: |
+        set -e
+        . {{ home_dir }}/zksync_env.sh
+        /usr/bin/expect << 'EOF'
+        set timeout 600
+        spawn {{ home_dir }}/.local/bin/zkstack chain init
+        expect "Do you want to deploy Paymaster contract?"
+        send "\r"
+        expect "What is the RPC URL of the L1 network?"
+        send "\r"
+        expect "Please provide server database url for chain test"
+        send "\r"
+        expect "Please provide server database name for chain test"
+        send "\r"
+        expect eof
+        EOF
+      args:
+        executable: /bin/bash
+        chdir: "{{ home_dir }}/zksync-era"
+      environment:
+        PATH: "{{ home_dir }}/.local/bin:{{ home_dir }}/.foundry/bin:{{ ansible_env.PATH }}"  
+
+    - name: Configure Avail DA general config
+      become_user: "{{ user }}"
+      ansible.builtin.shell: |
+        echo '{{ lookup('template', 'general.yaml.j2') }}' >> "{{ home_dir }}/zksync-era/chains/{{ chain_name }}/configs/general.yaml"
+
+    - name: Configure Avail DA secrets
+      become_user: "{{ user }}"
+      ansible.builtin.shell: |
+        echo '{{ lookup('template', 'secrets.yaml.j2') }}' >> "{{ home_dir }}/zksync-era/chains/{{ chain_name }}/configs/secrets.yaml"
+
+    - name: Start ZKSync server if seed phrase is provided
+      become_user: "{{ user }}"
+      shell: |
+        set -e
+        . {{ home_dir }}/zksync_env.sh
+        /usr/bin/expect << 'EOF'
+        set timeout 300
+        spawn {{ home_dir }}/.local/bin/zkstack server --chain {{ chain_name }}
+        expect "*"
+        EOF
+      args:
+        executable: /bin/bash
+        chdir: "{{ home_dir }}/zksync-era"
+      environment:
+        PATH: "{{ home_dir }}/.local/bin:{{ home_dir }}/.foundry/bin:{{ ansible_env.PATH }}"
+      when: avail_seed_phrase != ""
+
+    - name: Print seed phrase configuration instructions
+      debug:
+        msg: |
+          ============================================================
+          If you want to update your seed phrase later:
+
+          1. Edit the secrets config file at:
+             {{ home_dir }}/zksync-era/chains/{{ chain_name }}/configs/secrets.yaml
+
+          2. Update the configuration:
+             da:
+               avail:
+                 seed_phrase: "your-seed-phrase-here"
+
+          3. Make sure to set proper permissions:
+             chmod 600 {{ home_dir }}/zksync-era/chains/{{ chain_name }}/configs/secrets.yaml
+
+          4. Get your seed phrase from your created account:
+             https://docs.availproject.org/user-guides/accounts
+          ============================================================
+
+    - name: Print setup completion message
+      debug:
+        msg: |
+          ============================================================
+          ZKSync Era with Avail DA setup is complete!
+
+          Chain Name: {{ chain_name }}
+          App ID: {{ avail_app_id }}
+          Config Location: {{ home_dir }}/zksync-era/chains/{{ chain_name }}/configs/
+
+          To start your chain (if you did not provide a seed phrase), ssh into your VM and run:
+          cd {{ home_dir }}/zksync-era
+          zkstack server --chain {{ chain_name }}
+          ============================================================

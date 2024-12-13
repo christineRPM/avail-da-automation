@@ -1,0 +1,10 @@
+---
+# Collections
+collections:
+  - name: ansible.posix         # For Linux system operations
+  - name: community.general     # General utilities and modules
+  - name: community.docker      # For Docker operations if needed
+  - name: community.crypto      # For handling certificates and keys
+
+# Roles
+roles: []  # We can add specific roles later as needed

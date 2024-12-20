@@ -403,7 +403,7 @@
         set -e
         . {{ home_dir }}/zksync_env.sh
         /usr/bin/expect << 'EOF'
-        set timeout 600
+        set timeout 900
         spawn {{ home_dir }}/.local/bin/zkstack chain init
         expect "Do you want to deploy Paymaster contract?"
         send "\r"
